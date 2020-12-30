@@ -1,0 +1,158 @@
+---
+title: "Covid_analysis_ANT"
+author: "Bojan Makivic"
+date: "30 12 2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Libraries
+
+```{r include=TRUE}
+library(tidyverse)
+library(lubridate)
+library(sf)
+library(tmap)
+library(dplyr)
+library(rmapshaper)
+```
+
+```{r load-packages, include=FALSE}
+library(tidyverse)
+library(lubridate)
+library(sf)
+library(tmap)
+library(dplyr)
+library(rmapshaper)
+library(knitr)
+opts_chunk$set(fig.width=10, fig.height=6)
+```
+
+## Loading the data
+
+```{r}
+load("covid.rda")
+```
+
+## Preparing the data
+We are creating new data frame "covid" and taking first 10 signs form the column Time in order to define new column "datum" with standardized date DD-MM-YYYY
+```{r}
+covid <- Covid %>%
+  mutate(datum = dmy(substring(Time, 1, 10)))
+```
+
+
+Data frame "dat" returns the "covid" data frame with all data from date 17.11.2020 to 28 days backward. We create variable "day_28_avg" in new data frame "day_28" calculating new covid cases averaged over 28 days for each district separately. Same was done for seven day averaged variable "day_78_avg" of new covid cases per district. 
+```{r}
+dat <- covid %>%
+  filter(datum <= "2020-11-17", datum > as.Date("2020-11-17") - 28)
+
+day_28 <- dat %>%
+  group_by(GKZ, Bezirk, AnzEinwohner) %>%
+  summarise(day_28_avg = round(mean(AnzahlFaelle)))
+
+day_7 <- dat %>%
+  group_by(GKZ) %>%
+  filter(datum == max(datum)) %>%
+  summarise(day_7_avg = round(AnzahlFaelle7Tage / 7))
+```
+
+
+Two data frames were merged in new data frame "data_full" and we created four new variables in the same data frame:
+- Seven days averaged per 1000 capita 
+- 28 days averaged per 1000 citizens
+- Absolute differences between seven and 28 days averaged new cases of covid
+- Difference between seven and 28 days averaged new cases of covid per 1000 capita 
+```{r}
+data_full <- merge(day_28, day_7, by = c("GKZ"))
+
+data_full <- data_full %>%
+  mutate(
+    day_7_avg_1K = day_7_avg / AnzEinwohner * 1000,
+    day_28_avg_1K = day_28_avg / AnzEinwohner * 1000,
+    difference_abs = day_7_avg - day_28_avg,
+    difference_1K = difference_abs / AnzEinwohner * 1000
+  )
+```
+
+
+Data related to whole Austria. Same as in previous chunk with creation of new variable in the "data_full" that calculate the 7-to-28 days difference of new covid cases on the district level compared to the same difference on the whole country level.
+```{r}
+Einwohner_A <- sum(unique(dat$AnzEinwohner))
+data_A_28 <- sum(data_full$day_28_avg)
+data_A_7 <- sum(data_full$day_7_avg)
+difference_A_abs <- data_A_7 - data_A_28
+difference_A_1K <- difference_A_abs/Einwohner_A*1000
+day_7_avg_A_1K <- data_A_7/Einwohner_A*1000
+day_28_avg_A_1K <- data_A_28/Einwohner_A*1000
+
+data_full$diff_Bez_to_A_1K <- data_full$difference_1K/difference_A_1K
+```
+
+FINAL DATA FRAME
+```{r}
+data_full
+```
+
+
+## Uploading the polygon data for Austria
+
+The polygons with political districts from Austria are uploaded through .shp file from STATISTIK_AUSTRIA. Those data are prepared and merged with "data_full" crating new data frame "data_full_bez" contain additionally geo-data about political districts in Austria. State Vienna needed additional reprocessing because the geo-data did not allow us to create unique state of Vienna butobserved this polygon as 23 different districts. We have joined all Vienna districts above GKZ 900 in one unique district Vienna. 
+
+```{r}
+fName <- "Analysetechniken/STATISTIK_AUSTRIA_POLBEZ_20200101Polygon.shp"
+
+bez <- st_read(dsn = fName)
+
+data_full <- data_full %>%
+  mutate(id = as.character(GKZ))
+
+data_full_bez <- bez %>%
+  left_join(data_full, by = "id")
+
+
+id <- data_full_bez %>%
+  filter(grepl("^9", id)) %>%
+  pull(id)
+id.not <- setdiff(id, "900")
+
+data_full_bez <- data_full_bez %>%
+  filter(!(id %in% id.not))
+
+data_full_bez %>% filter(grepl("^9", id))
+```
+
+## Interactive viewing of map plots
+
+```{r}
+current.mode <- tmap_mode("plot")
+ttm()
+```
+## PLOTS
+
+If we observe the absolute 7-to-28 days difference, we can see that Vienna and Zell am See have the highest increase in the last week, whereas all other districts have not demonstrated significant difference if we compare last week average to last 4 weeks average.
+
+```{r difference_abs, echo=TRUE}
+tm_shape(data_full_bez) + tm_polygons(
+  col = "difference_abs",
+  palette = "YlGnBu", contrast = .7, id = "difference_abs", title = "AVG"
+) + tm_layout(title = "7-to-28 days difference of covid cases and its consequent district-to-country reationship") +
+  tm_scale_bar(breaks = c(0, 25, 50, 75, 100), text.size = 1 / 2) +
+  tm_text("Bezirk", size = 0.55)  + tmap_mode("view")
+```
+
+### Per 1000 capita
+On this graph we compare same relationship as demonstrated on the previous graph but relative to 1K per capita. The result is here different. We observe now less difference in Vienna, whereas Zell am See still has higher increase in covid cases in last week compared to last 4 weeks. Additionally the graph demonstrates the district Völkermarkt, city Klagenfurt and basically majority of districts in the state Carinthia have higher number of covid cases in the last week if we normalize the date to 1K per capita.
+```{r diff_Bez_to_A_1K, echo=TRUE}
+tm_shape(data_full_bez) + tm_polygons(
+  col = "diff_Bez_to_A_1K",
+  palette = "YlGnBu", contrast = .7, id = "diff_Bez_to_A_1K", title = "AVG"
+) + tm_layout (title = "7-to-28 days difference of covid cases per 1K capita and its consequent district-to-country reationship") +
+  tm_scale_bar(breaks = c(0, 25, 50, 75, 100), text.size = 1 / 2) +
+  tm_text("Bezirk", size = 0.55)  + tmap_mode("view")
+
+```
+
